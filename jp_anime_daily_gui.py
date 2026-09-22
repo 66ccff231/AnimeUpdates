@@ -791,7 +791,7 @@ class AnimeApp:
         messagebox.showinfo(
             f"关于 日漫每日更新表 v{APP_VERSION}",
             "数据源：AniList（日本动画的全球数据库）\n"
-            "anilist.co · 与 B 站无关\n\n"
+            "anilist.co \n\n"
             "纯 Python 标准库实现：tkinter 界面 + 标准库 HTTP。\n"
             "抓取在后台线程执行，界面不会卡死。\n\n"
             f"缓存目录：{core.CACHE_DIR}\n"
