@@ -10,7 +10,7 @@
 用 AniList 的公开 GraphQL API 抓「日本动画」的播出日程，
 在终端打印本周每天更新什么。
 
-和 B 站没有任何关系：AniList 是日本动画的全球数据库（英文站 anilist.co），
+AniList 是日本动画的全球数据库（英文站 anilist.co），
 数据来自各动画官方公布的在播日程，带精确到分钟的播出时间戳。
 
 零依赖：只用 Python 标准库。
@@ -531,7 +531,7 @@ def build_entries(raw, tz_offset_hours, args):
                 "genres": (m.get("genres") or [])[:3],
                 "studio": (studios[0].get("name") if studios else "") or "",
                 "stream": stream[:3],
-                # 中文名（bgm.tv 是中文动画数据库，给个搜索入口，不依赖 B 站）
+                # 中文名（bgm.tv 是中文动画数据库，给个搜索入口）
                 "bgm": "https://bgm.tv/subject_search/" + quote(main) + "?cat=2",
                 "time_local": local_dt.strftime("%H:%M"),
                 "time_jst": jst_dt.strftime("%H:%M"),
@@ -646,7 +646,7 @@ def humanize(delta):
 def main():
     setup_console()
     ap = argparse.ArgumentParser(
-        description="日漫每日更新表（数据源 AniList，与 B 站无关）",
+        description="日漫每日更新表（数据源 AniList）",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     ap.add_argument("--before", type=int, default=3, help="今天往前几天（默认 3）")

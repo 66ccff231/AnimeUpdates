@@ -659,7 +659,7 @@ class AnimeApp:
                              outline="", tags="bg")
             c.create_text(60, 30, anchor="w", text="日漫每日更新表",
                           fill="#ffffff", font=(FONT_UI, 15, "bold"), tags="bg")
-            c.create_text(61, 53, anchor="w", text="数据源 AniList · 与 B 站无关",
+            c.create_text(61, 53, anchor="w", text="数据源 AniList",
                           fill=p["banner_sub"], font=(FONT_UI, 9), tags="bg")
         else:
             c.delete("txt")
