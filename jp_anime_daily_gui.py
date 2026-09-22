@@ -267,12 +267,21 @@ def _icon_file():
 
 
 def load_config():
-    try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data if isinstance(data, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
+    """读取设置。
+
+    必须用 utf-8-sig：这个文件是给人改的，用记事本保存会带 BOM，
+    而带 BOM 的 JSON 用 utf-8 读会直接抛异常——那样所有设置会静默丢失。
+    """
+    for enc in ("utf-8-sig", "utf-8"):
+        try:
+            with open(CONFIG_PATH, "r", encoding=enc) as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except FileNotFoundError:
+            return {}
+        except Exception:  # noqa: BLE001
+            continue
+    return {}
 
 
 def save_config(cfg):
@@ -281,6 +290,193 @@ def save_config(cfg):
             json.dump(cfg, f, ensure_ascii=False, indent=2)
     except Exception:  # noqa: BLE001
         pass
+
+
+# ---------------------------------------------------------------------------
+# 配色与主题
+#
+# tkinter 默认的 vista 主题把按钮背景、边框颜色这类外观项锁死了，改不动。
+# 所以统一换成 clam 主题（它几乎所有外观项都听 style 的），再铺一套自己的配色，
+# 才能做出一致的观感。深色模式只是把同一份配置换一套颜色值。
+# ---------------------------------------------------------------------------
+
+FONT_UI = "Microsoft YaHei UI"
+
+LIGHT = {
+    "bg": "#f3f4f9",          # 页面底色
+    "card": "#ffffff",        # 卡片/工具条底色
+    "line": "#e2e4ee",        # 分隔线
+    "text": "#1b1d29",
+    "text2": "#6b7080",       # 次要文字
+    "accent": "#6c5ce7",      # 品牌紫
+    "accent2": "#00b8d9",     # 品牌青
+    "accent_dark": "#5a49d6",
+    "field": "#ffffff",       # 输入框底
+    "field_border": "#d7dae6",
+    "row": "#ffffff",
+    "row_alt": "#f7f8fd",     # 隔行
+    "row_hover": "#edf0ff",   # 鼠标悬停
+    "today": "#ffeef6",       # 今天那一组
+    "past": "#8b90a0",        # 已播出（前景）
+    "next": "#c2410c",        # 待播出（前景）
+    "sel": "#e4e0ff",         # 选中行
+    "sel_fg": "#2b2450",
+    "head_bg": "#eef0f8",     # 表头
+    "head_hover": "#e3e6f5",
+    "banner_sub": "#e6e2ff",
+    "scroll": "#d6d9e6",
+    "scroll_hover": "#bcc1d4",
+}
+
+DARK = {
+    "bg": "#13141b",
+    "card": "#1b1d26",
+    "line": "#2b2e3c",
+    "text": "#e8e9f2",
+    "text2": "#98a0b8",
+    "accent": "#8b7bff",
+    "accent2": "#25c8e6",
+    "accent_dark": "#7a68f0",
+    "field": "#23252f",
+    "field_border": "#363a4a",
+    "row": "#1b1d26",
+    "row_alt": "#20222d",
+    "row_hover": "#282b3a",
+    "today": "#2e2233",
+    "past": "#6f7690",
+    "next": "#ffa06a",
+    "sel": "#343059",
+    "sel_fg": "#f1efff",
+    "head_bg": "#232633",
+    "head_hover": "#2c3040",
+    "banner_sub": "#dcd7ff",
+    "scroll": "#343849",
+    "scroll_hover": "#464b62",
+}
+
+
+def _hex_to_rgb(h):
+    h = h.lstrip("#")
+    return int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+
+
+def lerp_color(c1, c2, t):
+    """两个 #rrggbb 之间按 t（0~1）插值。"""
+    t = max(0.0, min(1.0, t))
+    a, b = _hex_to_rgb(c1), _hex_to_rgb(c2)
+    return "#%02x%02x%02x" % tuple(
+        int(round(a[i] + (b[i] - a[i]) * t)) for i in range(3)
+    )
+
+
+class Theme:
+    """把整套 ttk 样式按配色方案配置好；换主题时通知注册过的普通控件。"""
+
+    def __init__(self, root):
+        self.root = root
+        self.style = ttk.Style(root)
+        self.dark = False
+        self.pal = dict(LIGHT)
+        self.listeners = []
+
+    def on_change(self, fn):
+        self.listeners.append(fn)
+
+    def toggle(self):
+        self.apply(not self.dark)
+
+    def apply(self, dark):
+        self.dark = bool(dark)
+        self.pal = dict(DARK if self.dark else LIGHT)
+        p = self.pal
+        s = self.style
+
+        # clam 才开始听 style 的话；vista/winnative 会把很多设置忽略掉
+        try:
+            s.theme_use("clam")
+        except Exception:  # noqa: BLE001
+            pass
+
+        self.root.configure(bg=p["bg"])
+        s.configure(
+            ".", background=p["bg"], foreground=p["text"], font=(FONT_UI, 10),
+            bordercolor=p["line"], lightcolor=p["card"], darkcolor=p["card"],
+            focuscolor=p["card"], troughcolor=p["bg"], fieldbackground=p["field"],
+        )
+
+        s.configure("Bg.TFrame", background=p["bg"])
+        s.configure("Card.TFrame", background=p["card"])
+        s.configure("Line.TFrame", background=p["line"])
+        s.configure("TLabel", background=p["bg"], foreground=p["text"])
+        s.configure("Card.TLabel", background=p["card"], foreground=p["text2"])
+        s.configure("Status.TLabel", background=p["card"], foreground=p["text2"],
+                    font=(FONT_UI, 9))
+
+        # 普通按钮：扁平、卡片底色、悬停变浅
+        s.configure("TButton", background=p["card"], foreground=p["text"],
+                    bordercolor=p["field_border"], focuscolor=p["card"],
+                    relief="flat", padding=(12, 5))
+        s.map(
+            "TButton",
+            background=[("active", p["row_hover"]), ("disabled", p["card"])],
+            foreground=[("disabled", p["text2"])],
+        )
+        # 主按钮：品牌色实心
+        s.configure("Accent.TButton", background=p["accent"], foreground="#ffffff",
+                    bordercolor=p["accent"], focuscolor=p["accent"],
+                    relief="flat", padding=(14, 5))
+        s.map(
+            "Accent.TButton",
+            background=[("active", p["accent_dark"]), ("disabled", p["field_border"])],
+            foreground=[("disabled", p["text2"])],
+        )
+
+        for name in ("TCombobox", "TSpinbox", "TEntry"):
+            s.configure(name, fieldbackground=p["field"], background=p["card"],
+                        foreground=p["text"], bordercolor=p["field_border"],
+                        arrowcolor=p["text2"], insertcolor=p["text"],
+                        lightcolor=p["field_border"], darkcolor=p["field_border"],
+                        padding=4)
+            s.map(name, fieldbackground=[("readonly", p["field"])],
+                  foreground=[("readonly", p["text"])],
+                  bordercolor=[("focus", p["accent"])])
+        s.map("TCombobox", arrowcolor=[("active", p["accent"])])
+
+        s.configure("TCheckbutton", background=p["card"], foreground=p["text"],
+                    focuscolor=p["card"], indicatorcolor=p["field"])
+        s.map("TCheckbutton", background=[("active", p["card"])],
+              indicatorcolor=[("selected", p["accent"])])
+
+        # 表格
+        s.configure("Treeview", background=p["row"], fieldbackground=p["row"],
+                    foreground=p["text"], rowheight=28, font=(FONT_UI, 10),
+                    bordercolor=p["line"], lightcolor=p["card"], darkcolor=p["card"])
+        s.configure("Treeview.Heading", background=p["head_bg"], foreground=p["text2"],
+                    relief="flat", padding=(6, 7), font=(FONT_UI, 9, "bold"))
+        s.map("Treeview.Heading", background=[("active", p["head_hover"])],
+              foreground=[("active", p["accent"])])
+        s.map("Treeview", background=[("selected", p["sel"])],
+              foreground=[("selected", p["sel_fg"])])
+
+        for orient in ("Vertical", "Horizontal"):
+            name = f"{orient}.TScrollbar"
+            s.configure(name, background=p["scroll"], troughcolor=p["bg"],
+                        bordercolor=p["bg"], arrowcolor=p["text2"],
+                        relief="flat", arrowsize=12)
+            s.map(name, background=[("active", p["scroll_hover"])])
+
+        # 下拉列表（不是 ttk 控件，只能走 option 数据库）
+        self.root.option_add("*TCombobox*Listbox.background", p["field"])
+        self.root.option_add("*TCombobox*Listbox.foreground", p["text"])
+        self.root.option_add("*TCombobox*Listbox.selectBackground", p["accent"])
+        self.root.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
+        self.root.option_add("*TCombobox*Listbox.font", (FONT_UI, 10))
+
+        for fn in self.listeners:
+            try:
+                fn()
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -412,7 +608,10 @@ class AnimeApp:
                                variable=self.days_var)
         vm.add_separator()
         vm.add_checkbutton(label="只看已播出", variable=self.aired_only,
-                           command=self.render)
+                           command=self._on_aired_menu)
+        vm.add_separator()
+        vm.add_checkbutton(label="深色模式", variable=self.dark_var,
+                           command=self.toggle_dark)
         vm.add_separator()
         vm.add_command(label="清空搜索框", accelerator="Esc", command=self._clear_search)
         vm.add_command(label="回到默认排序（按时间）",
@@ -429,22 +628,81 @@ class AnimeApp:
         self.root.config(menu=menubar)
 
     def _build_header(self):
-        """表格上方的仪表盘摘要条。"""
-        head = ttk.Frame(self.root, padding=(12, 2, 12, 2))
-        head.pack(fill="x")
-        self.head_left = tk.Label(head, anchor="w", text="",
-                                  font=("Microsoft YaHei UI", 12, "bold"),
-                                  fg="#5b4bd6")
-        self.head_left.pack(side="left")
-        self.head_right = tk.Label(head, anchor="e", text="",
-                                   font=("Microsoft YaHei UI", 10),
-                                   fg="#5a6070")
-        self.head_right.pack(side="right")
+        """顶部渐变横幅：左边 logo 和标题，右边「今天几部」和「下一部」。"""
+        self.banner = tk.Canvas(self.root, height=78, highlightthickness=0, bd=0)
+        self.banner.pack(fill="x")
+        self.banner.bind("<Configure>", self._on_banner_resize)
+        self.banner_w = 0
+        self.banner_left = "今天 — 部更新"
+        self.banner_right = ""
+        self.banner_right2 = ""
+
+    def _on_banner_resize(self, event):
+        if event.width != self.banner_w:
+            self.banner_w = event.width
+            self._draw_banner(full=True)
+
+    def _draw_banner(self, full=False):
+        """full=True 连渐变底一起重画；否则只重画文字（打字筛选时每键都调，得够快）。"""
+        c = self.banner
+        p = self.theme.pal
+        w = self.banner_w or c.winfo_width() or 900
+        h = 78
+        if full:
+            c.delete("all")
+            # 品牌紫 -> 品牌青 的横向渐变，逐列画竖线（比逐像素生成图片快得多）
+            for x in range(0, w, 3):
+                colour = lerp_color(p["accent"], p["accent2"], x / max(1, w - 1))
+                c.create_line(x, 0, x, h, fill=colour, width=3, tags="bg")
+            # 白色播放三角徽标
+            c.create_polygon(24, 25, 24, 53, 48, 39, fill="#ffffff",
+                             outline="", tags="bg")
+            c.create_text(60, 30, anchor="w", text="日漫每日更新表",
+                          fill="#ffffff", font=(FONT_UI, 15, "bold"), tags="bg")
+            c.create_text(61, 53, anchor="w", text="数据源 AniList · 与 B 站无关",
+                          fill=p["banner_sub"], font=(FONT_UI, 9), tags="bg")
+        else:
+            c.delete("txt")
+        c.create_text(w - 20, 29, anchor="e", text=self.banner_left,
+                      fill="#ffffff", font=(FONT_UI, 13, "bold"), tags="txt")
+        c.create_text(w - 20, 52, anchor="e", text=self.banner_right,
+                      fill="#ffffff", font=(FONT_UI, 9), tags="txt")
+        if self.banner_right2:
+            c.create_text(w - 20, 66, anchor="e", text=self.banner_right2,
+                          fill=p["banner_sub"], font=(FONT_UI, 8), tags="txt")
 
     def _reset_sort(self):
         self.sort_col = None
         self.sort_desc = False
         self.render()
+
+    def toggle_dark(self):
+        """切换深色模式，并记住选择。"""
+        self.theme.apply(bool(self.dark_var.get()))
+        self.cfg["dark"] = bool(self.dark_var.get())
+        save_config(self.cfg)
+        self._sync_aired_btn()
+
+    def _on_aired_menu(self):
+        """从菜单里切换「只看已播出」时，按钮外观也要跟着变。"""
+        self._sync_aired_btn()
+        self.render()
+
+    def _toggle_aired(self):
+        self.aired_only.set(not self.aired_only.get())
+        self._sync_aired_btn()
+        self.render()
+
+    def _sync_aired_btn(self):
+        """「只看已播出」按下时用实心品牌色，一眼能看出筛选开着。"""
+        on = bool(self.aired_only.get())
+        try:
+            self.aired_btn.configure(
+                style="Accent.TButton" if on else "TButton",
+                text="只看已播出 ✓" if on else "只看已播出",
+            )
+        except Exception:  # noqa: BLE001
+            pass
 
     # ---------------- 菜单动作 ----------------
 
@@ -556,6 +814,7 @@ class AnimeApp:
                 "type": self.type_var.get(),
                 "score": int(self.score_var.get()),
                 "aired_only": bool(self.aired_only.get()),
+                "dark": bool(self.dark_var.get()),
             })
             # 窗口还没真正显示过时 geometry 是无效默认值，别拿它覆盖上次记录
             if self.root.winfo_viewable():
@@ -593,42 +852,45 @@ class AnimeApp:
     # ---------------- 界面搭建 ----------------
 
     def _setup_style(self):
-        style = ttk.Style()
-        for theme in ("vista", "winnative", "clam"):
-            if theme in style.theme_names():
-                try:
-                    style.theme_use(theme)
-                    break
-                except Exception:  # noqa: BLE001
-                    continue
-        base = ("Microsoft YaHei UI", 10)
-        style.configure("Treeview", font=base, rowheight=27)
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 10, "bold"))
-        style.configure("TLabel", font=base)
-        style.configure("TButton", font=base)
-        style.configure("TCheckbutton", font=base)
-        style.configure("Status.TLabel", font=("Microsoft YaHei UI", 9),
-                        foreground="#5a6070")
-        self.root.option_add("*TCombobox*Listbox.font", base)
+        self.dark_var = tk.BooleanVar(value=bool(self.cfg.get("dark", False)))
+        self.theme = Theme(self.root)
+        self.theme.on_change(self._on_theme_changed)
+        self.theme.apply(bool(self.cfg.get("dark", False)))
+
+    def _on_theme_changed(self):
+        """换主题时，ttk 之外的东西要自己跟着改。"""
+        p = self.theme.pal
+        try:
+            self.status_bar.configure(style="Card.TFrame")
+            self.banner_sub_fill = p["banner_sub"]
+            self._draw_banner(full=True)
+            self._apply_tree_tags()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _build_toolbar(self):
-        bar = ttk.Frame(self.root, padding=(10, 8, 10, 4))
-        bar.pack(fill="x")
+        outer = ttk.Frame(self.root, style="Bg.TFrame", padding=(14, 12, 14, 0))
+        outer.pack(fill="x")
 
-        self.refresh_btn = ttk.Button(bar, text="⟳ 刷新", command=self.refresh)
+        bar = ttk.Frame(outer, style="Card.TFrame", padding=(12, 9))
+        bar.pack(fill="x")
+        ttk.Frame(outer, style="Line.TFrame", height=1).pack(fill="x")
+
+        self.refresh_btn = ttk.Button(bar, text="⟳  刷新", style="Accent.TButton",
+                                      command=self.refresh)
         self.refresh_btn.pack(side="left")
 
-        ttk.Label(bar, text="  范围").pack(side="left")
+        ttk.Label(bar, text="范围", style="Card.TLabel").pack(side="left", padx=(16, 5))
         self.days_var = tk.StringVar(value=self._cfg_choice("days", DAYS_CHOICES, "7 天"))
         ttk.Combobox(bar, textvariable=self.days_var, width=6, state="readonly",
-                     values=[n for n, _ in DAYS_CHOICES]).pack(side="left", padx=(4, 10))
+                     values=[n for n, _ in DAYS_CHOICES]).pack(side="left")
 
-        ttk.Label(bar, text="类型").pack(side="left")
+        ttk.Label(bar, text="类型", style="Card.TLabel").pack(side="left", padx=(14, 5))
         self.type_var = tk.StringVar(value=self._cfg_choice("type", TYPE_CHOICES, "全部类型"))
         ttk.Combobox(bar, textvariable=self.type_var, width=9, state="readonly",
-                     values=[n for n, _ in TYPE_CHOICES]).pack(side="left", padx=(4, 10))
+                     values=[n for n, _ in TYPE_CHOICES]).pack(side="left")
 
-        ttk.Label(bar, text="最低评分").pack(side="left")
+        ttk.Label(bar, text="最低评分", style="Card.TLabel").pack(side="left", padx=(14, 5))
         try:
             saved_score = int(self.cfg.get("score", 0))
         except Exception:  # noqa: BLE001
@@ -636,19 +898,22 @@ class AnimeApp:
         self.score_var = tk.IntVar(value=max(0, min(100, saved_score)))
         sp = ttk.Spinbox(bar, from_=0, to=100, increment=5, width=4,
                          textvariable=self.score_var, command=self.render)
-        sp.pack(side="left", padx=(4, 10))
+        sp.pack(side="left")
         sp.bind("<KeyRelease>", lambda _e: self.render())
 
-        ttk.Label(bar, text="搜索").pack(side="left")
+        ttk.Label(bar, text="搜索", style="Card.TLabel").pack(side="left", padx=(14, 5))
         self.q_var = tk.StringVar()
-        ent = ttk.Entry(bar, textvariable=self.q_var, width=22)
-        ent.pack(side="left", padx=(4, 10))
-        self.search_entry = ent
+        self.search_entry = ttk.Entry(bar, textvariable=self.q_var, width=22)
+        self.search_entry.pack(side="left")
         self.q_var.trace_add("write", lambda *_: self.render())
 
         self.aired_only = tk.BooleanVar(value=bool(self.cfg.get("aired_only", False)))
-        ttk.Checkbutton(bar, text="只看已播出", variable=self.aired_only,
-                        command=self.render).pack(side="left")
+        # 用按钮而不是 Checkbutton：clam 的复选框小方块不跟着配色走，
+        # 深色模式下会突兀地留一个白框，按钮则完全可控。
+        self.aired_btn = ttk.Button(bar, text="只看已播出", width=10,
+                                    command=self._toggle_aired)
+        self.aired_btn.pack(side="left", padx=(16, 0))
+        self._sync_aired_btn()
 
         # 类型变化只重新渲染（数据已经在内存里）；范围变化要重排 + 重新抓
         self.type_var.trace_add("write", lambda *_: self.render())
@@ -660,9 +925,11 @@ class AnimeApp:
         return value if value in dict(choices) else default
 
     def _build_tree(self):
-        wrap = ttk.Frame(self.root, padding=(10, 0, 10, 0))
+        outer = ttk.Frame(self.root, style="Bg.TFrame", padding=(14, 10, 14, 0))
+        outer.pack(fill="both", expand=True)
+        wrap = ttk.Frame(outer, style="Card.TFrame", padding=1)
         wrap.pack(fill="both", expand=True)
-        inner = ttk.Frame(wrap)
+        inner = ttk.Frame(wrap, style="Card.TFrame")
         inner.pack(fill="both", expand=True)
 
         cols = tuple(c[0] for c in COLUMNS)
@@ -679,22 +946,22 @@ class AnimeApp:
         ysb = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ysb.set)
         self.tree.pack(side="left", fill="both", expand=True)
-        ysb.pack(side="right", fill="y")
+        ysb.pack(side="right", fill="y", padx=(1, 0), pady=1)
 
         # 窗口拉窄时列会被挤掉，给个横向滚动条兜底
-        xsb = ttk.Scrollbar(wrap, orient="horizontal", command=self.tree.xview)
+        xsb = ttk.Scrollbar(inner, orient="horizontal", command=self.tree.xview)
         self.tree.configure(xscrollcommand=xsb.set)
         xsb.pack(side="bottom", fill="x")
+        self._apply_tree_tags()
 
-        self.tree.tag_configure("today", background="#fff0f6")
-        self.tree.tag_configure("odd", background="#f7f8fc")
-        self.tree.tag_configure("past", foreground="#7a8090")
-        self.tree.tag_configure("next", foreground="#c2410c")
-
+        self._hover_row = None
+        self._hover_bg = []
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self.on_right_click)
         self.tree.bind("<Return>", self.on_double_click)
         self.tree.bind("<<TreeviewSelect>>", self.on_select)
+        self.tree.bind("<Motion>", self._on_hover)
+        self.tree.bind("<Leave>", lambda _e: self._restore_hover())
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="打开 AniList 详情", command=self.open_detail)
@@ -704,13 +971,58 @@ class AnimeApp:
         self.menu.add_command(label="复制日文原名", command=self.copy_title_ja)
         self.menu.add_command(label="复制 AniList 链接", command=self.copy_url)
 
+    def _apply_tree_tags(self):
+        """表格的斑马纹 / 悬停 / 今天高亮都跟着主题走。
+
+        注意：同一个选项只能由**一个**标签提供，否则 ttk 里谁生效要看标签顺序，
+        很难预料。所以行标签里永远只有一个负责背景色的标签（BG_TAGS 之一）。
+        """
+        p = self.theme.pal
+        self.tree.tag_configure("row", background=p["row"])
+        self.tree.tag_configure("odd", background=p["row_alt"])
+        self.tree.tag_configure("hover", background=p["row_hover"])
+        self.tree.tag_configure("today", background=p["today"])
+        self.tree.tag_configure("past", foreground=p["past"])
+        self.tree.tag_configure("next", foreground=p["next"])
+        self.tree.tag_configure("today_fg", foreground=p["accent"])
+
+    # 只负责背景色的标签，悬停时要整组换掉
+    BG_TAGS = ("row", "odd", "hover", "today")
+
+    def _on_hover(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid == self._hover_row:
+            return
+        self._restore_hover()
+        if not iid or not self.nodes.get(iid):
+            return          # 日期行不加悬停效果
+        tags = list(self.tree.item(iid, "tags"))
+        self._hover_bg = [t for t in tags if t in self.BG_TAGS]
+        self.tree.item(iid, tags=tuple(
+            [t for t in tags if t not in self.BG_TAGS] + ["hover"]))
+        self._hover_row = iid
+
+    def _restore_hover(self):
+        if self._hover_row:
+            try:
+                tags = [t for t in self.tree.item(self._hover_row, "tags")
+                        if t != "hover"]
+                self.tree.item(self._hover_row, tags=tuple(tags + self._hover_bg))
+            except Exception:  # noqa: BLE001
+                pass
+        self._hover_row = None
+        self._hover_bg = []
+
     def _build_status(self):
-        wrap = ttk.Frame(self.root, padding=(10, 4, 10, 8))
-        wrap.pack(fill="x")
-        self.status = ttk.Label(wrap, anchor="w", style="Status.TLabel")
+        outer = ttk.Frame(self.root, style="Bg.TFrame", padding=(14, 8, 14, 10))
+        outer.pack(fill="x")
+        ttk.Frame(outer, style="Line.TFrame", height=1).pack(fill="x")
+        self.status_bar = ttk.Frame(outer, style="Card.TFrame", padding=(12, 6))
+        self.status_bar.pack(fill="x")
+        self.status = ttk.Label(self.status_bar, anchor="w", style="Status.TLabel")
         self.status.pack(side="left", fill="x", expand=True)
         self.hint = ttk.Label(
-            wrap, anchor="e", style="Status.TLabel",
+            self.status_bar, anchor="e", style="Status.TLabel",
             text="双击打开详情 · 右键更多操作 · F5 刷新 · Ctrl+F 搜索",
         )
         self.hint.pack(side="right")
@@ -868,6 +1180,7 @@ class AnimeApp:
     def render(self):
         if not hasattr(self, "tree"):
             return
+        self._restore_hover()          # 表格要重建了，先松开悬停引用
         self._heading_texts()
         self.tree.delete(*self.tree.get_children())
         self.nodes.clear()
@@ -890,21 +1203,23 @@ class AnimeApp:
 
             label = f"{d['dow']} {d['label']}"
             if is_today:
-                label += "  ← 今天"
+                label += "   ← 今天"
+            label += f"     {len(rows)} 部"
             parent = self.tree.insert(
-                "", "end", open=True,
-                text=label,
-                values=("", "", "", f"{len(rows)} 部", "", "", "", ""),
-                tags=("today",) if is_today else (),
+                "", "end", open=True, text=label,
+                values=("",) * len(COLUMNS),
+                tags=("today", "today_fg") if is_today else (),
             )
             self.nodes[parent] = None
             for idx, e in enumerate(rows):
-                # 斑马纹只和有背景色的 today 标签冲突，所以今天的行不上条纹
-                tags = ["past" if e["aired"] else "next"]
-                if idx % 2 == 1 and not is_today:
-                    tags.append("odd")
+                # 背景色只由这一个标签负责，避免多个标签争同一个选项
+                if is_today:
+                    bg = "today"
+                else:
+                    bg = "odd" if idx % 2 else "row"
+                tags = (bg, "past" if e["aired"] else "next")
                 iid = self.tree.insert(
-                    parent, "end", tags=tuple(tags),
+                    parent, "end", tags=tags,
                     values=(
                         e["time_local"],
                         e["time_jst"],
@@ -919,15 +1234,17 @@ class AnimeApp:
                 )
                 self.nodes[iid] = e
 
-        # 顶部仪表盘
-        self.head_left.config(text=f"今天 {today_count} 部更新")
+        # 顶部横幅
+        self.banner_left = f"今天 {today_count} 部更新"
         nxt = min((e for e in self.entries if e["ts"] > now),
                   key=lambda x: x["ts"], default=None)
         if nxt:
-            self.head_right.config(
-                text=f"下一部　{nxt['title']}　{nxt['time_local']}（{nxt['countdown']}）")
+            self.banner_right = f"下一部　{core.display_title(nxt)}"
+            self.banner_right2 = f"{nxt['time_local']} 本地 / {nxt['time_jst']} JST（{nxt['countdown']}）"
         else:
-            self.head_right.config(text="窗口内已全部播完")
+            self.banner_right = "窗口内已全部播完"
+            self.banner_right2 = ""
+        self._draw_banner(full=False)
 
         # 状态栏
         self._set_status(
