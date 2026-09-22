@@ -282,6 +282,58 @@ def _icon_file():
     return make_icon(ICON_PATH)
 
 
+def banner_icon(size):
+    """把应用图标做成 Tk 能在横幅里显示的图像。
+
+    注意：Tk 的 PhotoImage **不支持 ICO 格式**（只认 PNG/GIF/PPM），所以不能直接
+    `PhotoImage(file="app.ico")`——那样会抛 "couldn't recognize data in image file"。
+    Windows 资源管理器和任务栏能显示是因为那是系统在解析 ICO，跟 Tk 无关。
+    这里用 Pillow 把 ICO 里最大的一帧解出来、缩到目标尺寸、转成 PNG 字节，
+    再走 base64 的 data= 喂给 Tk（这条路在封面那边已经验证是稳的）。
+    """
+    if not HAVE_PIL:
+        return None
+    try:
+        src = _icon_file()
+    except Exception:  # noqa: BLE001
+        return None
+    if not src or not os.path.exists(src):
+        return None
+    try:
+        with Image.open(src) as im:
+            frame = im.convert("RGBA")
+            frame = frame.resize((size, size), Image.LANCZOS)
+            buf = io.BytesIO()
+            frame.save(buf, "PNG", optimize=True)
+        return tk.PhotoImage(data=base64.b64encode(buf.getvalue()).decode("ascii"))
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def banner_icon_fallback(size):
+    """图标文件的 Pillow 也解不开时的最后一条路：直接读原始角色图。"""
+    if not HAVE_PIL:
+        return None
+    for p in (r"C:\Users\柒柒\Desktop\白发赤瞳高马尾Q版二次元女孩生成 (1).png",):
+        if not os.path.exists(p):
+            continue
+        try:
+            with Image.open(p) as im:
+                im = im.convert("RGB")
+                w, h = im.size
+                side = round(w * 0.78)
+                x0 = round(w * 0.11)
+                y0 = round(h * 0.05)
+                frame = im.crop((x0, y0, x0 + side, y0 + side)).resize(
+                    (size, size), Image.LANCZOS)
+                buf = io.BytesIO()
+                frame.save(buf, "PNG", optimize=True)
+            return tk.PhotoImage(data=base64.b64encode(buf.getvalue()).decode("ascii"))
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
 def load_config():
     """读取设置。
 
@@ -529,55 +581,60 @@ def cover_download_async(url, app):
 FONT_UI = "Microsoft YaHei UI"
 
 LIGHT = {
-    "bg": "#f3f4f9",          # 页面底色
+    # 配色取自应用图标那张角色图：暖白底 + 绯红点缀 + 近黑文字
+    "bg": "#fbf7f4",          # 页面底色（比纯白暖一点，像纸）
     "card": "#ffffff",        # 卡片/工具条底色
-    "line": "#e2e4ee",        # 分隔线
-    "text": "#1b1d29",
-    "text2": "#6b7080",       # 次要文字
-    "accent": "#6c5ce7",      # 品牌紫
-    "accent2": "#00b8d9",     # 品牌青
-    "accent_dark": "#5a49d6",
+    "toolbar": "#f7eeea",     # 工具条描边（比页面稍深，让卡片浮起来）
+    "line": "#f0dfda",        # 分隔线（淡玫瑰灰）
+    "text": "#1d1416",        # 近黑，带一点酒红
+    "text2": "#8a7176",       # 次要文字
+    "accent": "#9e1c22",      # 品牌绯红（深红，保证白字可读）
+    "accent2": "#e2292e",     # 亮绯红（图标赤瞳/领结的色）
+    "accent_dark": "#7d1419",
+    "accent_disabled": "#d8bcbb",   # 主按钮禁用时的底色（浅绯，字仍看得清）
     "field": "#ffffff",       # 输入框底
-    "field_border": "#d7dae6",
+    "field_border": "#e7d2cd",
     "row": "#ffffff",
-    "row_alt": "#f7f8fd",     # 隔行
-    "row_hover": "#edf0ff",   # 鼠标悬停
-    "today": "#ffeef6",       # 今天那一组
-    "past": "#8b90a0",        # 已播出（前景）
+    "row_alt": "#fdf6f4",     # 隔行
+    "row_hover": "#fbeae7",   # 鼠标悬停
+    "today": "#fdeef1",       # 今天那一组（极淡粉）
+    "past": "#9b8388",        # 已播出（前景）
     "next": "#c2410c",        # 待播出（前景）
-    "sel": "#e4e0ff",         # 选中行
-    "sel_fg": "#2b2450",
-    "head_bg": "#eef0f8",     # 表头
-    "head_hover": "#e3e6f5",
-    "banner_sub": "#e6e2ff",
-    "scroll": "#d6d9e6",
-    "scroll_hover": "#bcc1d4",
+    "sel": "#fbe0e1",         # 选中行（淡绯红）
+    "sel_fg": "#5e0f14",
+    "head_bg": "#fbf0ec",     # 表头
+    "head_hover": "#f6e2dd",
+    "banner_sub": "#ffd9da",  # 深红横幅上的副标题
+    "scroll": "#e6d5d0",
+    "scroll_hover": "#d3bdb8",
 }
 
 DARK = {
-    "bg": "#13141b",
-    "card": "#1b1d26",
-    "line": "#2b2e3c",
-    "text": "#e8e9f2",
-    "text2": "#98a0b8",
-    "accent": "#8b7bff",
-    "accent2": "#25c8e6",
-    "accent_dark": "#7a68f0",
-    "field": "#23252f",
-    "field_border": "#363a4a",
-    "row": "#1b1d26",
-    "row_alt": "#20222d",
-    "row_hover": "#282b3a",
-    "today": "#2e2233",
-    "past": "#6f7690",
+    "bg": "#161113",          # 带一点暖红的近黑
+    "card": "#201a1c",
+    "toolbar": "#342a2d",
+    "line": "#342a2d",
+    "text": "#f6ece9",
+    "text2": "#b09a9c",
+    "accent": "#f0575c",      # 深色底上用亮一点的绯红
+    "accent2": "#c2303a",
+    "accent_dark": "#d94549",
+    "accent_disabled": "#4d3a3c",
+    "field": "#2a2225",
+    "field_border": "#433639",
+    "row": "#201a1c",
+    "row_alt": "#261f21",
+    "row_hover": "#312628",
+    "today": "#3a2228",
+    "past": "#7d6a6d",
     "next": "#ffa06a",
-    "sel": "#343059",
-    "sel_fg": "#f1efff",
-    "head_bg": "#232633",
-    "head_hover": "#2c3040",
-    "banner_sub": "#dcd7ff",
-    "scroll": "#343849",
-    "scroll_hover": "#464b62",
+    "sel": "#4d2128",
+    "sel_fg": "#ffe9e7",
+    "head_bg": "#2a2224",
+    "head_hover": "#352b2e",
+    "banner_sub": "#ffd3d4",
+    "scroll": "#3d3134",
+    "scroll_hover": "#514144",
 }
 
 
@@ -608,9 +665,6 @@ class Theme:
     def on_change(self, fn):
         self.listeners.append(fn)
 
-    def toggle(self):
-        self.apply(not self.dark)
-
     def apply(self, dark):
         self.dark = bool(dark)
         self.pal = dict(DARK if self.dark else LIGHT)
@@ -632,9 +686,14 @@ class Theme:
 
         s.configure("Bg.TFrame", background=p["bg"])
         s.configure("Card.TFrame", background=p["card"])
+        # 工具条描边：外框铺一层稍深的色，内层留 1px 边，就有细描边的观感
+        s.configure("ToolbarEdge.TFrame", background=p["toolbar"])
         s.configure("Line.TFrame", background=p["line"])
         s.configure("TLabel", background=p["bg"], foreground=p["text"])
         s.configure("Card.TLabel", background=p["card"], foreground=p["text2"])
+        # 工具条里的控件标签用主文字色：原来跟副标题同色，五个控件挤在一起显得发灰发散
+        s.configure("Toolbar.TLabel", background=p["card"], foreground=p["text"],
+                    font=(FONT_UI, 10))
         s.configure("Status.TLabel", background=p["card"], foreground=p["text2"],
                     font=(FONT_UI, 9))
 
@@ -644,7 +703,7 @@ class Theme:
                     relief="flat", padding=(12, 5))
         s.map(
             "TButton",
-            background=[("active", p["row_hover"]), ("disabled", p["card"])],
+            background=[("active", p["row_hover"]), ("disabled", p["field"])],
             foreground=[("disabled", p["text2"])],
         )
         # 主按钮：品牌色实心
@@ -653,8 +712,11 @@ class Theme:
                     relief="flat", padding=(14, 5))
         s.map(
             "Accent.TButton",
-            background=[("active", p["accent_dark"]), ("disabled", p["field_border"])],
-            foreground=[("disabled", p["text2"])],
+            # 禁用时不要用近乎白的底色（那样「抓取中…」几乎看不见），
+            # 换成浅绯 + 深一点的文字，既能看出不可点，也读得清
+            background=[("active", p["accent_dark"]),
+                        ("disabled", p["accent_disabled"])],
+            foreground=[("disabled", "#5b3b3b" if not self.dark else "#e8d5d5")],
         )
 
         for name in ("TCombobox", "TSpinbox", "TEntry"):
@@ -731,7 +793,7 @@ class AnimeApp:
         self.cover_img = None      # 持有 PhotoImage 引用，否则会被 GC 回收变成空白
 
         self._set_app_identity()
-        root.title("日漫每日更新表 · AniList")
+        root.title(" 日漫每日更新表 · AniList")   # 前导空格：图标和标题文字别贴太紧
         root.minsize(940, 520)
 
         self._setup_style()
@@ -769,6 +831,29 @@ class AnimeApp:
                 self.root.iconbitmap(icon)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _apply_titlebar_theme(self, dark):
+        """按主题把 Windows 标题栏切成深色/浅色。
+
+        Tk 自己改不了标题栏（那是 DWM 画的），但 Win10 1809+ 提供了
+        DwmSetWindowAttribute：属性 20 是「沉浸式深色模式」，20 不认的旧版本
+        用 19。调用失败就静默跳过，不影响其它功能。
+        """
+        if os.name != "nt":
+            return
+        try:
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            if not hwnd:
+                hwnd = self.root.winfo_id()
+            value = ctypes.c_int(1 if dark else 0)
+            for attr in (20, 19):          # 新版本属性、旧版本属性
+                res = ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(value), ctypes.sizeof(value))
+                if res == 0:
+                    break
+        except Exception:  # noqa: BLE001
+            pass
 
     def _menu_bar_height(self):
         """菜单栏实际占的高度。
@@ -860,7 +945,7 @@ class AnimeApp:
         self.root.config(menu=menubar)
 
     def _build_header(self):
-        """顶部渐变横幅：左边 logo 和标题，右边「今天几部」和「下一部」。"""
+        """顶部渐变横幅：左边应用图标和标题，右边「今天几部」和「下一部」。"""
         self.banner = tk.Canvas(self.root, height=78, highlightthickness=0, bd=0)
         self.banner.pack(fill="x")
         self.banner.bind("<Configure>", self._on_banner_resize)
@@ -868,6 +953,8 @@ class AnimeApp:
         self.banner_left = "今天 — 部更新"
         self.banner_right = ""
         self.banner_right2 = ""
+        self._banner_img = None      # 横幅左上的图标，得留引用否则被 GC 回收
+        self._banner_img_size = 0
 
     def _on_banner_resize(self, event):
         if event.width != self.banner_w:
@@ -882,16 +969,32 @@ class AnimeApp:
         h = 78
         if full:
             c.delete("all")
-            # 品牌紫 -> 品牌青 的横向渐变，逐列画竖线（比逐像素生成图片快得多）
+            # 品牌深红 -> 亮绯红 的横向渐变，逐列画竖线（比逐像素生成图片快得多）
             for x in range(0, w, 3):
                 colour = lerp_color(p["accent"], p["accent2"], x / max(1, w - 1))
                 c.create_line(x, 0, x, h, fill=colour, width=3, tags="bg")
-            # 白色播放三角徽标
-            c.create_polygon(24, 25, 24, 53, 48, 39, fill="#ffffff",
-                             outline="", tags="bg")
-            c.create_text(60, 30, anchor="w", text="日漫每日更新表",
+            # 底缘一道更亮的绯红线，收一下横幅的边
+            c.create_line(0, h - 2, w, h - 2, fill=p["accent2"], width=2, tags="bg")
+            # 左边放应用图标本身（Tk 不认 ICO，得先经 Pillow 转成 PNG）
+            side = 56
+            if getattr(self, "_banner_img", None) is None or self._banner_img_size != side:
+                self._banner_img = banner_icon(side) or banner_icon_fallback(side)
+                self._banner_img_size = side
+            if self._banner_img is not None:
+                cx = 18 + side // 2
+                # 先描一圈浅色光晕，让深色制服不会糊进红底里
+                c.create_oval(cx - side // 2 - 2, h // 2 - side // 2 - 2,
+                              cx + side // 2 + 2, h // 2 + side // 2 + 2,
+                              outline="#ffe3e4", width=2, tags="bg")
+                c.create_image(cx, h // 2, anchor="center",
+                               image=self._banner_img, tags="bg")
+            else:
+                # 实在读不到就退回原来的三角徽标，不让横幅开天窗
+                c.create_polygon(24, 25, 24, 53, 48, 39, fill="#ffffff",
+                                 outline="", tags="bg")
+            c.create_text(92, 31, anchor="w", text="日漫每日更新表",
                           fill="#ffffff", font=(FONT_UI, 15, "bold"), tags="bg")
-            c.create_text(61, 53, anchor="w", text="数据源 AniList",
+            c.create_text(93, 55, anchor="w", text="数据源 AniList",
                           fill=p["banner_sub"], font=(FONT_UI, 9), tags="bg")
         else:
             c.delete("txt")
@@ -1096,6 +1199,7 @@ class AnimeApp:
     def _on_theme_changed(self):
         """换主题时，ttk 之外的东西要自己跟着改。"""
         p = self.theme.pal
+        self._apply_titlebar_theme(self.theme.dark)   # 标题栏也跟着深/浅
         try:
             self.status_bar.configure(style="Card.TFrame")
             self.banner_sub_fill = p["banner_sub"]
@@ -1120,25 +1224,27 @@ class AnimeApp:
         outer = ttk.Frame(self.root, style="Bg.TFrame", padding=(14, 12, 14, 0))
         outer.pack(fill="x")
 
-        bar = ttk.Frame(outer, style="Card.TFrame", padding=(12, 9))
+        # 1px 描边：外层铺稍深的色，内层留 1px 缝，卡片就从页面底色里浮出来了
+        edge = ttk.Frame(outer, style="ToolbarEdge.TFrame", padding=1)
+        edge.pack(fill="x")
+        bar = ttk.Frame(edge, style="Card.TFrame", padding=(12, 8))
         bar.pack(fill="x")
-        ttk.Frame(outer, style="Line.TFrame", height=1).pack(fill="x")
 
-        self.refresh_btn = ttk.Button(bar, text="⟳  刷新", style="Accent.TButton",
-                                      command=self.refresh)
+        self.refresh_btn = ttk.Button(bar, text="⟳ 刷新", width=8,
+                                      style="Accent.TButton", command=self.refresh)
         self.refresh_btn.pack(side="left")
 
-        ttk.Label(bar, text="范围", style="Card.TLabel").pack(side="left", padx=(16, 5))
+        ttk.Label(bar, text="范围", style="Toolbar.TLabel").pack(side="left", padx=(16, 5))
         self.days_var = tk.StringVar(value=self._cfg_choice("days", DAYS_CHOICES, "7 天"))
         ttk.Combobox(bar, textvariable=self.days_var, width=6, state="readonly",
                      values=[n for n, _ in DAYS_CHOICES]).pack(side="left")
 
-        ttk.Label(bar, text="类型", style="Card.TLabel").pack(side="left", padx=(14, 5))
+        ttk.Label(bar, text="类型", style="Toolbar.TLabel").pack(side="left", padx=(14, 5))
         self.type_var = tk.StringVar(value=self._cfg_choice("type", TYPE_CHOICES, "全部类型"))
         ttk.Combobox(bar, textvariable=self.type_var, width=9, state="readonly",
                      values=[n for n, _ in TYPE_CHOICES]).pack(side="left")
 
-        ttk.Label(bar, text="最低评分", style="Card.TLabel").pack(side="left", padx=(14, 5))
+        ttk.Label(bar, text="最低评分", style="Toolbar.TLabel").pack(side="left", padx=(14, 5))
         try:
             saved_score = int(self.cfg.get("score", 0))
         except Exception:  # noqa: BLE001
@@ -1149,18 +1255,18 @@ class AnimeApp:
         sp.pack(side="left")
         sp.bind("<KeyRelease>", lambda _e: self.render())
 
-        ttk.Label(bar, text="搜索", style="Card.TLabel").pack(side="left", padx=(14, 5))
+        ttk.Label(bar, text="搜索", style="Toolbar.TLabel").pack(side="left", padx=(14, 5))
         self.q_var = tk.StringVar()
-        self.search_entry = ttk.Entry(bar, textvariable=self.q_var, width=22)
-        self.search_entry.pack(side="left")
+        self.search_entry = ttk.Entry(bar, textvariable=self.q_var, width=20)
+        self.search_entry.pack(side="left", padx=(0, 4))
         self.q_var.trace_add("write", lambda *_: self.render())
 
         self.aired_only = tk.BooleanVar(value=bool(self.cfg.get("aired_only", False)))
         # 用按钮而不是 Checkbutton：clam 的复选框小方块不跟着配色走，
         # 深色模式下会突兀地留一个白框，按钮则完全可控。
-        self.aired_btn = ttk.Button(bar, text="只看已播出", width=10,
+        self.aired_btn = ttk.Button(bar, text="只看已播出", width=11,
                                     command=self._toggle_aired)
-        self.aired_btn.pack(side="left", padx=(16, 0))
+        self.aired_btn.pack(side="left", padx=(18, 0))
         self._sync_aired_btn()
 
         # 类型变化只重新渲染（数据已经在内存里）；范围变化要重排 + 重新抓
@@ -1517,7 +1623,7 @@ class AnimeApp:
             self.pending = True      # 正在抓，记下来，完了再抓一次
             return
         self.busy = True
-        self.refresh_btn.config(state="disabled", text="抓取中…")
+        self.refresh_btn.config(state="disabled", text="⟳ 抓取…")
         self._set_status("正在从 AniList 抓取播出日程…")
         # 必须在主线程里读控件，再把算好的参数交给子线程
         params = self.window_args()
