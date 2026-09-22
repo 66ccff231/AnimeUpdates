@@ -29,6 +29,7 @@
 import argparse
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -309,6 +310,159 @@ def load_cache(mode):
 
 
 # ----------------------------------------------------------------------------
+# 中文番剧名
+#
+# AniList 只有日文原名 / 罗马音 / 英文名，没有中文。中文名来自 bangumi-data
+# （bangumi-data 是一个开源动画数据集合，条目里同时带 aniList / mal / bangumi
+# 的 id 和 zh-Hans 译名），所以可以按 id 精确匹配，不用靠标题猜。
+#
+# 匹配顺序：aniList id -> mal id -> 精确标题 -> 去季数后缀 -> 前缀模糊。
+# 默认索引覆盖约 83%，剩下的条目回退显示日文原名。
+# ----------------------------------------------------------------------------
+
+TITLES_PATH = os.path.join(HERE, "titles_zh.json")
+BANGUMI_DATA_URL = "https://cdn.jsdelivr.net/npm/bangumi-data/dist/data.json"
+
+# 季数/版本后缀，做模糊匹配时先剥掉
+_SEASON_RE = re.compile(
+    r"(第\d+期|第\d+クール|第\d+シーズン|season\d+|part\d+|ミニ|短編|(?:19|20)\d{2})"
+)
+_NOISE_RE = re.compile(
+    r"[\s\u3000]+"
+    r"|[!-/:-@\[-`{-~！-＠［-｀｛-～、。・「」『』（）()～〜\-—–_]"
+)
+
+_zh_index = None          # 进程内缓存，避免每次查都读盘
+_zh_relaxed_keys = None   # 模糊匹配用的候选键（按长度降序）
+
+
+def norm_title(s):
+    """标题归一化：去掉空白和标点，用于精确比对。"""
+    if not s:
+        return ""
+    return _NOISE_RE.sub("", str(s).lower())
+
+
+def norm_title_relaxed(s):
+    """再剥掉季数/年份后缀，用于宽松比对。"""
+    return _SEASON_RE.sub("", norm_title(s))
+
+
+def titles_paths():
+    """中文名索引可能的位置：先程序目录（用户可自行更新），再打包内置。"""
+    paths = [TITLES_PATH]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        paths.append(os.path.join(meipass, "titles_zh.json"))
+    return paths
+
+
+def load_zh_index():
+    """读取中文名索引；读不到就返回空字典（程序照常用日文原名）。"""
+    global _zh_index, _zh_relaxed_keys
+    if _zh_index is not None:
+        return _zh_index
+    for path in titles_paths():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                idx = json.load(f)
+            if isinstance(idx, dict) and idx.get("titles"):
+                _zh_index = idx
+                break
+        except Exception:  # noqa: BLE001
+            continue
+    else:
+        _zh_index = {}
+    _zh_relaxed_keys = None
+    return _zh_index
+
+
+def zh_title(media, index=None):
+    """给一条 AniList media 找中文名，找不到返回空字符串。"""
+    idx = load_zh_index() if index is None else index
+    if not idx:
+        return ""
+    by_anilist = idx.get("anilist") or {}
+    by_mal = idx.get("mal") or {}
+    by_title = idx.get("titles") or {}
+    by_relaxed = idx.get("titles_relaxed") or {}
+
+    hit = by_anilist.get(str(media.get("id")))
+    if hit:
+        return hit
+    if media.get("idMal"):
+        hit = by_mal.get(str(media.get("idMal")))
+        if hit:
+            return hit
+
+    title = media.get("title") or {}
+    for cand in (title.get("native"), title.get("romaji"), title.get("english")):
+        if not cand:
+            continue
+        hit = by_title.get(norm_title(cand))
+        if hit:
+            return hit
+        hit = by_relaxed.get(norm_title_relaxed(cand))
+        if hit:
+            return hit
+
+    # 前缀模糊：只在两边都够长时用，取最长的一条，避免把无关作品配错
+    native = title.get("native") or title.get("romaji") or ""
+    relaxed = norm_title_relaxed(native)
+    if len(relaxed) >= 6 and by_relaxed:
+        global _zh_relaxed_keys
+        if _zh_relaxed_keys is None:
+            _zh_relaxed_keys = sorted(by_relaxed, key=len, reverse=True)
+        for key in _zh_relaxed_keys:
+            if len(key) >= 6 and (key in relaxed or relaxed in key):
+                return by_relaxed[key]
+    return ""
+
+
+def build_zh_index(dest=None, url=BANGUMI_DATA_URL, timeout=180, log=print):
+    """下载 bangumi-data 并生成中文名索引。返回索引字典。"""
+    dest = dest or TITLES_PATH
+    log(f"→ 下载 bangumi-data（约 7 MB）…")
+    req = urllib.request.Request(url, headers={"User-Agent": UA})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+
+    items = payload.get("items") or []
+    log(f"  共 {len(items)} 条目，正在建立索引…")
+    idx = {"anilist": {}, "mal": {}, "titles": {}, "titles_relaxed": {}}
+    for it in items:
+        tr = it.get("titleTranslate") or {}
+        zh_list = tr.get("zh-Hans") or tr.get("zh-Hant") or []
+        zh = zh_list[0] if zh_list else ""
+        if not zh:
+            continue
+        for site in it.get("sites") or []:
+            name = site.get("site")
+            if name == "aniList":
+                idx["anilist"][str(site.get("id"))] = zh
+            elif name == "mal":
+                idx["mal"][str(site.get("id"))] = zh
+        idx["titles"][norm_title(it.get("title"))] = zh
+        relaxed = norm_title_relaxed(it.get("title"))
+        if len(relaxed) >= 4:
+            idx["titles_relaxed"].setdefault(relaxed, zh)
+
+    idx["source"] = url
+    idx["built_at"] = datetime.now().isoformat(timespec="seconds")
+    with open(dest, "w", encoding="utf-8") as f:
+        json.dump(idx, f, ensure_ascii=False, separators=(",", ":"))
+    size = os.path.getsize(dest) / 1024
+    log(
+        f"  ✓ 已写入 {dest}（{size:.0f} KB）："
+        f"aniList id {len(idx['anilist'])}、mal id {len(idx['mal'])}、"
+        f"标题 {len(idx['titles'])}"
+    )
+    global _zh_index, _zh_relaxed_keys
+    _zh_index, _zh_relaxed_keys = None, None
+    return idx
+
+
+# ----------------------------------------------------------------------------
 # 数据整理
 # ----------------------------------------------------------------------------
 
@@ -321,6 +475,11 @@ def pick_title(m):
     main = native or romaji or english or f"#{m.get('id')}"
     subs = [x for x in (romaji, english) if x and x != main]
     return main, subs
+
+
+def display_title(entry):
+    """界面上优先显示中文名；没有中文名就回退到日文原名。"""
+    return (entry.get("title_zh") or entry.get("title") or "").strip()
 
 
 def build_entries(raw, tz_offset_hours, args):
@@ -349,6 +508,7 @@ def build_entries(raw, tz_offset_hours, args):
         jst_dt = datetime.fromtimestamp(ts, tz=JST)
 
         main, subs = pick_title(m)
+        zh = zh_title(m)
         studios = ((m.get("studios") or {}).get("nodes") or [])
         stream = [
             {"site": e.get("site"), "url": e.get("url")}
@@ -360,7 +520,8 @@ def build_entries(raw, tz_offset_hours, args):
                 "ts": ts,
                 "aired": ts <= now,
                 "episode": item.get("episode"),
-                "title": main,
+                "title": main,              # 日文原名（找不到中文名时也用它显示）
+                "title_zh": zh,             # 中文名，可能为空
                 "subs": subs,
                 "cover": ((m.get("coverImage") or {}).get("large") or ""),
                 "url": m.get("siteUrl") or f"https://anilist.co/anime/{m.get('id')}",
@@ -428,7 +589,7 @@ def print_console(days, entries, now, fetched_at, today_key, from_cache=None, tz
             ep = f"第{e['episode']}话" if e["episode"] else ""
             print(
                 f"   {pad(e['countdown'], 12)} {C.dim(e['time_local'])} "
-                f"{pad(cut(e['title'], 40), 42)}{pad(ep, 8)}"
+                f"{pad(cut(display_title(e), 40), 42)}{pad(ep, 8)}"
             )
 
     today_eps = [e for d in days if d["date"] == today_key for e in d["eps"]]
@@ -455,7 +616,7 @@ def print_console(days, entries, now, fetched_at, today_key, from_cache=None, tz
             state = C.green("● 已播") if e["aired"] else C.dim("○ 待播")
             print(
                 f"   {C.dim(e['time_local'])} "
-                f"{pad(cut(e['title'], 42), 44)}"
+                f"{pad(cut(display_title(e), 42), 44)}"
                 f"{pad(ep, 9)}{pad('[' + score + ']', 7)}{state}"
             )
 

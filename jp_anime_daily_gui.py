@@ -74,22 +74,24 @@ TYPE_CHOICES = [
 DAYS_CHOICES = [("今天", 0), ("3 天", 2), ("7 天", 6), ("14 天", 13), ("30 天", 29)]
 
 COLUMNS = [
-    # key, 表头, 列宽, 对齐, 是否弹性（只有番剧名吸收多余宽度）
-    ("local", "本地时间", 72, "center", False),
-    ("jst", "JST", 62, "center", False),
-    ("ep", "集数", 70, "center", False),
-    ("title", "番剧名", 300, "w", True),
-    ("score", "评分", 56, "center", False),
-    ("state", "状态", 66, "center", False),
-    ("format", "类型", 84, "center", False),
-    ("studio", "制作公司", 150, "w", False),
+    # key, 表头, 列宽, 对齐, 是否弹性（只有中文名吸收多余宽度）
+    ("local", "本地时间", 68, "center", False),
+    ("jst", "JST", 58, "center", False),
+    ("ep", "集数", 58, "center", False),
+    ("title", "番剧名（中文）", 248, "w", True),
+    ("title_ja", "原名（日文）", 178, "w", False),
+    ("score", "评分", 52, "center", False),
+    ("state", "状态", 58, "center", False),
+    ("format", "类型", 76, "center", False),
+    ("studio", "制作公司", 172, "w", False),
 ]
 
 SORT_KEYS = {
     "local": lambda e: e["ts"],
     "jst": lambda e: e["ts"],
     "ep": lambda e: e["episode"] or 0,
-    "title": lambda e: e["title"],
+    "title": lambda e: core.display_title(e),
+    "title_ja": lambda e: e["title"],
     "score": lambda e: e["score"] or -1,
     "state": lambda e: e["ts"],
     "format": lambda e: e["format"] or "",
@@ -302,6 +304,7 @@ class AnimeApp:
         self.cfg = load_config()
         self.closing = False
         self._poll_id = None
+        self._titles_busy = False
 
         self._set_app_identity()
         root.title("日漫每日更新表 · AniList")
@@ -398,6 +401,8 @@ class AnimeApp:
         fm.add_command(label="导出当前视图为 CSV…", command=self.export_csv)
         fm.add_command(label="打开数据文件夹", command=self.open_data_dir)
         fm.add_separator()
+        fm.add_command(label="更新番剧中文名库（下载约 7MB）", command=self.update_titles)
+        fm.add_separator()
         fm.add_command(label="退出", command=self.on_close)
         menubar.add_cascade(label="文件", menu=fm)
 
@@ -453,7 +458,8 @@ class AnimeApp:
                 rows.append([
                     d["date"], d["dow"], e["time_local"], e["time_jst"],
                     e["episode"] if e["episode"] else "",
-                    e["title"], " / ".join(e["subs"]), e["score"] or "",
+                    e.get("title_zh") or "", e["title"],
+                    " / ".join(e["subs"]), e["score"] or "",
                     "已播出" if e["aired"] else "待播出",
                     e["format"] or "", e["studio"] or "",
                     "、".join(e["genres"]), e["url"],
@@ -471,7 +477,8 @@ class AnimeApp:
         try:
             with open(path, "w", encoding="utf-8-sig", newline="") as f:
                 w = csv.writer(f)
-                w.writerow(["日期", "星期", "本地时间", "JST", "集数", "番剧名",
+                w.writerow(["日期", "星期", "本地时间", "JST", "集数",
+                            "番剧名（中文）", "原名（日文）",
                             "罗马音/英文名", "评分", "状态", "类型", "制作公司",
                             "标签", "AniList 链接"])
                 w.writerows(rows)
@@ -493,6 +500,21 @@ class AnimeApp:
 
     def open_anilist(self):
         webbrowser.open("https://anilist.co/search/anime?status=RELEASING&countryOfOrigin=JP")
+
+    def update_titles(self):
+        """后台重新下载并生成中文名索引，完成后自动刷新列表。"""
+        if getattr(self, "_titles_busy", False):
+            return
+        self._titles_busy = True
+        self._set_status("正在下载番剧中文名库（约 7 MB，请稍候）…")
+        threading.Thread(target=self._titles_worker, daemon=True).start()
+
+    def _titles_worker(self):
+        try:
+            core.build_zh_index(log=lambda *_: None)
+            self.queue.put(("titles", None))
+        except Exception as exc:  # noqa: BLE001
+            self.queue.put(("titles_err", str(exc)))
 
     def show_shortcuts(self):
         messagebox.showinfo(
@@ -554,6 +576,13 @@ class AnimeApp:
                 if kind == "ok":
                     entries, sd, before, after = payload
                     self._on_fetched(entries, sd, before, after)
+                elif kind == "titles":
+                    self._titles_busy = False
+                    self._set_status("中文名库已更新，正在重新匹配…")
+                    self.refresh()      # 重新抓一遍，让新的中文名生效
+                elif kind == "titles_err":
+                    self._titles_busy = False
+                    self._set_status(f"中文名库更新失败：{payload}")
                 else:
                     self._on_fetch_failed(payload)
         except queue.Empty:
@@ -665,12 +694,14 @@ class AnimeApp:
         self.tree.bind("<Double-1>", self.on_double_click)
         self.tree.bind("<Button-3>", self.on_right_click)
         self.tree.bind("<Return>", self.on_double_click)
+        self.tree.bind("<<TreeviewSelect>>", self.on_select)
 
         self.menu = tk.Menu(self.root, tearoff=0)
         self.menu.add_command(label="打开 AniList 详情", command=self.open_detail)
-        self.menu.add_command(label="在 bgm.tv 查中文名", command=self.open_bgm)
+        self.menu.add_command(label="在 bgm.tv 搜详情（日文原名）", command=self.open_bgm)
         self.menu.add_separator()
-        self.menu.add_command(label="复制番剧名", command=self.copy_title)
+        self.menu.add_command(label="复制中文名", command=self.copy_title_zh)
+        self.menu.add_command(label="复制日文原名", command=self.copy_title_ja)
         self.menu.add_command(label="复制 AniList 链接", command=self.copy_url)
 
     def _build_status(self):
@@ -811,8 +842,10 @@ class AnimeApp:
             return False
         q = self.q_var.get().strip().lower()
         if q:
-            hay = " ".join([e["title"], " ".join(e["subs"]), e["studio"] or "",
-                            e["format"] or ""]).lower()
+            hay = " ".join([
+                e.get("title_zh") or "", e["title"], " ".join(e["subs"]),
+                e["studio"] or "", e["format"] or "",
+            ]).lower()
             if q not in hay:
                 return False
         return True
@@ -876,6 +909,7 @@ class AnimeApp:
                         e["time_local"],
                         e["time_jst"],
                         f"第{e['episode']}话" if e["episode"] else "—",
+                        core.display_title(e),
                         e["title"],
                         e["score"] or "—",
                         "已播出" if e["aired"] else "待播出",
@@ -910,6 +944,21 @@ class AnimeApp:
         iid = self.tree.focus()
         return self.nodes.get(iid)
 
+    def on_select(self, _ev=None):
+        """选中一行时，在状态栏显示中文名 / 日文原名 / 制作公司。"""
+        e = self._selected_entry()
+        if not e:
+            return
+        names = [x for x in (e.get("title_zh"), e["title"]) if x]
+        tail = " · ".join(x for x in (
+            e["studio"], e["format"],
+            f"{e['score']}分" if e["score"] else "",
+        ) if x)
+        self._set_status(
+            f"{' ／ '.join(names)}    {tail}    "
+            f"{e['time_local']} 本地 / {e['time_jst']} JST（{e['countdown']}）"
+        )
+
     def on_double_click(self, event):
         iid = self.tree.identify_row(event.y) or self.tree.focus()
         entry = self.nodes.get(iid)
@@ -942,12 +991,22 @@ class AnimeApp:
         if e:
             webbrowser.open(e["bgm"])
 
-    def copy_title(self):
+    def copy_title_zh(self):
         e = self._selected_entry()
-        if e:
-            self.root.clipboard_clear()
-            self.root.clipboard_append(e["title"])
-            self._set_status(f"已复制：{e['title']}")
+        if not e:
+            return
+        text = e.get("title_zh") or e["title"]
+        self.root.clipboard_clear()
+        self.root.clipboard_append(text)
+        self._set_status(f"已复制中文名：{text}")
+
+    def copy_title_ja(self):
+        e = self._selected_entry()
+        if not e:
+            return
+        self.root.clipboard_clear()
+        self.root.clipboard_append(e["title"])
+        self._set_status(f"已复制日文原名：{e['title']}")
 
     def copy_url(self):
         e = self._selected_entry()

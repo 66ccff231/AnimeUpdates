@@ -48,12 +48,21 @@ def main():
     env["PYTHONIOENCODING"] = "utf-8"
 
     print("→ 用 PyInstaller 打包（目录版，运行时不需要解包，启动更快）…")
+    icon = os.path.join(HERE, "app.ico")
+    titles = os.path.join(HERE, "titles_zh.json")
+    sep = os.pathsep
     args = [
         sys.executable, "-m", "PyInstaller",
         "--noconfirm", "--onedir", "--noconsole", "--clean",
-        "--icon", os.path.join(HERE, "app.ico"),
-        # 把图标也一起打进去，程序启动时就不必现场重算（省一秒多）
-        "--add-data", os.path.join(HERE, "app.ico") + os.pathsep + ".",
+        "--icon", icon,
+        # 图标打进去就不用启动时现场重算；中文名索引打进去就不用首次联网下
+        "--add-data", f"{icon}{sep}.",
+    ]
+    if os.path.exists(titles):
+        args += ["--add-data", f"{titles}{sep}."]
+    else:
+        print("  ! 没有 titles_zh.json，中文名要等程序里手动更新")
+    args += [
         "--name", OUT_NAME,
         "--distpath", HERE,
         "--workpath", os.path.join(HERE, "_build_tmp"),
