@@ -1,0 +1,22 @@
+# 运行时数据（每次抓取都会生成新的，不该进仓库）
+data/
+gui_config.json
+
+# Python
+__pycache__/
+*.pyc
+
+# 打包相关的中间产物（可用 build_exe.py 重新生成）
+_build_deps/
+_build_tmp/
+build/
+dist/
+*.spec
+
+# 打包好的程序目录（26MB 二进制，用 build_exe.py 可重新生成）
+日漫每日更新表/
+
+# 调试时留下的空临时目录
+.piptmp/
+.runtmp/
+.pipcache/
