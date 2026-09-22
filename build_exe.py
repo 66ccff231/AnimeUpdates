@@ -40,6 +40,13 @@ def main():
             print("✗ 依赖下载失败")
             return 1
 
+    # 封面要解 JPEG，得有 Pillow；缺了就先补，否则打出来的 exe 一启动就崩
+    if not os.path.isdir(os.path.join(DEPS, "PIL")):
+        print("→ 缺少 Pillow（显示封面用），先下载 …")
+        if run([sys.executable, os.path.join(HERE, "_getdeps.py")]) != 0:
+            print("✗ 依赖下载失败")
+            return 1
+
     env = dict(os.environ)
     env["PYTHONPATH"] = DEPS
     env["TEMP"] = TMP          # 让 PyInstaller 的临时文件留在工作区内

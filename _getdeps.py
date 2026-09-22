@@ -18,7 +18,9 @@ import zipfile
 
 TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_build_deps")
 
-# pyinstaller 在 Windows 上需要的运行时依赖
+# 打包与运行需要的依赖
+# pillow 是必须的：界面要显示番剧封面，而 AniList 的封面约 2/3 是 JPEG，
+# Tk 自带的 PhotoImage 解不了 JPEG，只能靠 Pillow。
 PACKAGES = [
     "pyinstaller",
     "pyinstaller-hooks-contrib",
@@ -27,6 +29,7 @@ PACKAGES = [
     "pefile",
     "pywin32-ctypes",
     "setuptools",
+    "pillow",
 ]
 
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) wheel-fetcher"}

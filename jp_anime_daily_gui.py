@@ -4,7 +4,8 @@
 日漫每日更新表 · 桌面版（tkinter 窗口程序）
 ==========================================
 
-不需要安装任何东西（tkinter 是 Python 自带的），双击运行就是一个真正的窗口程序。
+不需要安装 Python 之外的东西就能运行（tkinter 是 Python 自带的）；
+显示番剧封面需要 Pillow，没装的话程序照常可用，只是封面面板提示缺依赖。
 
 它复用 jp_anime_daily.py 里已经写好的抓取逻辑（Fetcher / build_entries /
 group_days / 缓存读写），所以数据源、时间换算、筛选规则和命令行版完全一致。
@@ -13,10 +14,11 @@ jp_anime_daily.py 一个字都没改。
 功能：
   · 顶部工具栏：刷新、时间范围、类型、最低评分、搜索、只看已播出
   · 中间表格：按日期分组，今天高亮，点表头可排序
+  · 右侧封面面板：选中一行显示该番封面与详情（类型/公司/评分/话数/时刻/题材/流媒体）
   · 双击某一行 → 用浏览器打开 AniList 详情页
-  · 右键菜单 → 打开详情 / 查中文名(bgm.tv) / 复制标题
+  · 右键菜单 → 打开详情 / 查中文名(bgm.tv) / 重新加载封面 / 复制标题
   · 底部状态栏：数据时间、条目数、今天几集、下一部什么时候播
-  · 抓取在后台线程跑，窗口不会卡死；启动先用上次的缓存秒开，再自动抓最新
+  · 抓取和封面下载都在后台线程跑，窗口不会卡死；启动先用上次的缓存秒开，再自动抓最新
 
 用法：
     python jp_anime_daily_gui.py
@@ -24,8 +26,11 @@ jp_anime_daily.py 一个字都没改。
 """
 
 import argparse
+import base64
 import csv
 import ctypes
+import hashlib
+import io
 import json
 import os
 import queue
@@ -33,10 +38,21 @@ import struct
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from datetime import datetime, timedelta, timezone
 from tkinter import ttk, messagebox, filedialog
 import tkinter as tk
+
+# 封面缩略图需要解 JPEG——Tk 自带的 PhotoImage 只认 PNG/GIF，
+# 而 AniList 的封面约 2/3 是 JPEG（实测 192/295），所以这里引入 Pillow。
+try:
+    from PIL import Image, ImageTk
+    HAVE_PIL = True
+except ImportError:  # noqa: BLE001
+    Image = None
+    ImageTk = None
+    HAVE_PIL = False
 
 # ---------------------------------------------------------------------------
 # 复用命令行版的核心逻辑
@@ -293,6 +309,216 @@ def save_config(cfg):
 
 
 # ---------------------------------------------------------------------------
+# 封面图：下载 -> 磁盘缓存 -> 缩放 -> 交给 Tk
+#
+# 要点：
+#   1. 封面是网络图片，必须在子线程下（tkinter 不是线程安全的），
+#      取到之后走 queue 回主线程再贴到控件上。
+#   2. 磁盘缓存按 URL 的 sha1 命名，避免每次选中都重新下载；同一进程内再加一层
+#      PhotoImage 缓存，免得反复来回拖选时重复解码。
+#   3. Tk 的 PhotoImage 只认 PNG/GIF。Pillow 转出来的 PNG 有时它仍会拒收
+#      （"couldn't recognize image data"），所以统一走「PNG 字节 -> base64 的 data=」
+#      这条最稳的路，失败再退回文件路径。
+# ---------------------------------------------------------------------------
+
+COVER_PANEL_W = 246          # 右侧封面面板宽度
+COVER_W, COVER_H = 214, 300  # 封面显示区（AniList 封面约 230x323，竖版）
+COVER_CACHE_MAX_FILES = 600  # 磁盘缓存上限，超了就按访问时间淘汰
+COVER_MEM_MAX = 24           # 进程内 PhotoImage 缓存条数
+
+_COVER_DIR = os.path.join(core.CACHE_DIR, "covers")
+_cover_mem = {}              # cache_path -> PhotoImage（避免被 GC 回收）
+_cover_inflight = set()      # 正在下载的 URL，防止重复请求
+_cover_lock = threading.Lock()
+
+
+def _cover_dir():
+    os.makedirs(_COVER_DIR, exist_ok=True)
+    return _COVER_DIR
+
+
+def _cover_cache_path(url):
+    return os.path.join(_cover_dir(), hashlib.sha1(url.encode("utf-8")).hexdigest() + ".png")
+
+
+def _cover_fetch_bytes(url):
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "jp-anime-daily/1.0 (AniList cover cache)",
+                 "Accept": "image/*"},
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        return resp.read()
+
+
+def _cover_scale(im):
+    """等比缩放到封面区，超采样再降采样，边缘更干净。"""
+    im = im.convert("RGBA")
+    ratio = min(COVER_W / im.width, COVER_H / im.height, 1.0)
+    target = (max(1, round(im.width * ratio)), max(1, round(im.height * ratio)))
+    # 明显缩小时先按 2 倍目标尺寸缩，再收到目标尺寸
+    if ratio < 0.9:
+        mid = (max(target[0], round(im.width * ratio * 2)),
+               max(target[1], round(im.height * ratio * 2)))
+        im = im.resize(mid, Image.LANCZOS)
+    return im.resize(target, Image.LANCZOS)
+
+
+def cover_load(url, force=False):
+    """子线程里调用：返回 PNG 字节；失败抛异常。
+
+    下载与缩放都在这里做完，主线程只负责把字节变成 Tk 能用的对象。
+    """
+    if not HAVE_PIL:
+        raise RuntimeError("未安装 Pillow，无法解 JPEG 封面")
+    path = _cover_cache_path(url)
+    bad = path + ".bad"
+    if force:
+        for p in (path, bad):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+    if not os.path.exists(path) and not os.path.exists(bad):
+        try:
+            raw = _cover_fetch_bytes(url)
+            with Image.open(io.BytesIO(raw)) as im:
+                out = _cover_scale(im)
+            tmp = path + ".part"
+            out.save(tmp, "PNG", optimize=True)
+            os.replace(tmp, path)          # 原子替换，避免写到一半被读到
+        except Exception:
+            # 记一个 .bad 标记：这张图确实取不到，短时间内别反复重试拖慢界面
+            try:
+                with open(bad, "w", encoding="utf-8") as f:
+                    f.write("failed")
+            except OSError:
+                pass
+            raise
+    if os.path.exists(bad):
+        raise RuntimeError("封面不可用")
+    with open(path, "rb") as f:
+        png = f.read()
+    _cover_prune()
+    return png
+
+
+def _cover_prune():
+    """缓存文件太多时，删掉最久没被读过的那些。
+
+    不用文件 mtime 排序，而是按 atime——选中的图会被读取，atime 自然更新，
+    等于免费的 LRU。有些文件系统 atime 不更新，那退化成按 mtime 淘汰，也能用。
+    """
+    try:
+        files = [os.path.join(_COVER_DIR, n) for n in os.listdir(_COVER_DIR)]
+    except OSError:
+        return
+    if len(files) <= COVER_CACHE_MAX_FILES:
+        return
+    stamped = []
+    for p in files:
+        try:
+            st = os.stat(p)
+        except OSError:
+            continue
+        stamped.append((max(st.st_atime, st.st_mtime), p))
+    stamped.sort()
+    for _t, p in stamped[: len(stamped) - COVER_CACHE_MAX_FILES]:
+        try:
+            os.remove(p)
+        except OSError:
+            pass
+
+
+def cover_clear_cache():
+    """清空磁盘封面缓存，返回删掉的文件数。"""
+    n = 0
+    try:
+        for name in os.listdir(_COVER_DIR):
+            try:
+                os.remove(os.path.join(_COVER_DIR, name))
+                n += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    with _cover_lock:
+        _cover_mem.clear()
+        _cover_inflight.clear()
+    return n
+
+
+def cover_to_tk(png, size):
+    """主线程里调用：PNG 字节 -> Tk 图像（带高 DPI 适配与两级回退）。"""
+    path = _cover_cache_path("tk:%s:%dx%d:%s" % (len(png), size[0], size[1],
+                                                 hashlib.sha1(png).hexdigest()[:12]))
+    with _cover_lock:
+        hit = _cover_mem.get(path)
+    if hit is not None:
+        return hit
+
+    # 高 DPI 屏幕上 Tk 会按 scaling 放大图片，按比例缩一下才不会发虚、也不会撑破面板
+    scale = 1.0
+    try:
+        scale = float(tk._default_root.tk.call("tk", "scaling")) / 1.3333
+    except Exception:  # noqa: BLE001
+        pass
+    data = png
+    if HAVE_PIL and scale > 1.05:
+        try:
+            with Image.open(io.BytesIO(png)) as im:
+                small = im.resize((max(1, round(im.width / scale)),
+                                   max(1, round(im.height / scale))), Image.LANCZOS)
+            buf = io.BytesIO()
+            small.save(buf, "PNG", optimize=True)
+            data = buf.getvalue()
+        except Exception:  # noqa: BLE001
+            data = png
+
+    img = None
+    try:
+        img = tk.PhotoImage(data=base64.b64encode(data).decode("ascii"))
+    except Exception:  # noqa: BLE001
+        # 退路：先落到磁盘再按路径读（某些 Tk 构建对 data= 的 PNG 更挑剔）
+        try:
+            with open(path, "wb") as f:
+                f.write(data)
+            img = tk.PhotoImage(file=path)
+        except Exception:  # noqa: BLE001
+            img = None
+    if img is None:
+        return None
+
+    with _cover_lock:
+        _cover_mem[path] = img
+        if len(_cover_mem) > COVER_MEM_MAX:
+            for key in list(_cover_mem.keys())[: len(_cover_mem) - COVER_MEM_MAX]:
+                _cover_mem.pop(key, None)
+    return img
+
+
+def cover_download_async(url, app):
+    """起一个子线程下封面，结果丢进 app.queue（kind='cover'）。"""
+    with _cover_lock:
+        if url in _cover_inflight:
+            return
+        _cover_inflight.add(url)
+    token = app.cover_token
+
+    def worker():
+        try:
+            png = cover_load(url)
+            app.queue.put(("cover", (token, url, png, None)))
+        except Exception as exc:  # noqa: BLE001
+            app.queue.put(("cover", (token, url, None, str(exc))))
+        finally:
+            with _cover_lock:
+                _cover_inflight.discard(url)
+
+    threading.Thread(target=worker, daemon=True).start()
+
+
+# ---------------------------------------------------------------------------
 # 配色与主题
 #
 # tkinter 默认的 vista 主题把按钮背景、边框颜色这类外观项锁死了，改不动。
@@ -501,6 +727,8 @@ class AnimeApp:
         self.closing = False
         self._poll_id = None
         self._titles_busy = False
+        self.cover_token = 0       # 选中变了就 +1，用来丢弃过期的封面结果
+        self.cover_img = None      # 持有 PhotoImage 引用，否则会被 GC 回收变成空白
 
         self._set_app_identity()
         root.title("日漫每日更新表 · AniList")
@@ -598,6 +826,7 @@ class AnimeApp:
         fm.add_command(label="打开数据文件夹", command=self.open_data_dir)
         fm.add_separator()
         fm.add_command(label="更新番剧中文名库（下载约 7MB）", command=self.update_titles)
+        fm.add_command(label="清空封面缓存", command=self.clear_cover_cache)
         fm.add_separator()
         fm.add_command(label="退出", command=self.on_close)
         menubar.add_cascade(label="文件", menu=fm)
@@ -609,6 +838,9 @@ class AnimeApp:
         vm.add_separator()
         vm.add_checkbutton(label="只看已播出", variable=self.aired_only,
                            command=self._on_aired_menu)
+        vm.add_separator()
+        vm.add_checkbutton(label="显示封面面板", variable=self.cover_show_var,
+                           command=self.toggle_cover_panel)
         vm.add_separator()
         vm.add_checkbutton(label="深色模式", variable=self.dark_var,
                            command=self.toggle_dark)
@@ -792,8 +1024,9 @@ class AnimeApp:
             f"关于 日漫每日更新表 v{APP_VERSION}",
             "数据源：AniList（日本动画的全球数据库）\n"
             "anilist.co \n\n"
-            "纯 Python 标准库实现：tkinter 界面 + 标准库 HTTP。\n"
-            "抓取在后台线程执行，界面不会卡死。\n\n"
+            "tkinter 界面 + 标准库 HTTP。\n"
+            "封面解码用 Pillow（AniList 封面多为 JPEG，Tk 自带解码器不支持）。\n"
+            "抓取与封面下载都在后台线程执行，界面不会卡死。\n\n"
             f"缓存目录：{core.CACHE_DIR}\n"
             f"设置文件：{CONFIG_PATH}",
             parent=self.root,
@@ -835,6 +1068,8 @@ class AnimeApp:
                 if kind == "ok":
                     entries, sd, before, after = payload
                     self._on_fetched(entries, sd, before, after)
+                elif kind == "cover":
+                    self._on_cover_result(payload)
                 elif kind == "titles":
                     self._titles_busy = False
                     self._set_status("中文名库已更新，正在重新匹配…")
@@ -853,6 +1088,7 @@ class AnimeApp:
 
     def _setup_style(self):
         self.dark_var = tk.BooleanVar(value=bool(self.cfg.get("dark", False)))
+        self.cover_show_var = tk.BooleanVar(value=bool(self.cfg.get("show_cover", True)))
         self.theme = Theme(self.root)
         self.theme.on_change(self._on_theme_changed)
         self.theme.apply(bool(self.cfg.get("dark", False)))
@@ -865,6 +1101,18 @@ class AnimeApp:
             self.banner_sub_fill = p["banner_sub"]
             self._draw_banner(full=True)
             self._apply_tree_tags()
+        except Exception:  # noqa: BLE001
+            pass
+        # 封面面板不是 ttk 控件画的底和字，主题换了要手动跟一遍
+        try:
+            self.cover_canvas.configure(bg=p["field"], highlightbackground=p["line"])
+            self.cover_title.configure(foreground=p["text"])
+            self.cover_meta.configure(foreground=p["text2"])
+            # 封面图本身不用重下，重画一次即可（占位文字的颜色要跟着主题走）
+            if self.cover_img is not None:
+                self._cover_draw(self.cover_img)
+            else:
+                self._cover_show_current()
         except Exception:  # noqa: BLE001
             pass
 
@@ -943,6 +1191,13 @@ class AnimeApp:
             self.tree.column(key, width=width, minwidth=52, anchor=anchor,
                              stretch=stretch)
 
+        self._apply_tree_tags()
+        self._build_cover_panel(inner)
+        # 先把封面面板 pack 到右边，再让表格填充剩余空间。
+        # 顺序反过来的话 Treeview 的 expand=True 会吃掉整个宽度，面板就没地方了。
+        if self.cfg.get("show_cover", True):
+            self.cover_panel.pack(side="right", fill="y", padx=(1, 0), pady=1)
+
         ysb = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ysb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -952,7 +1207,6 @@ class AnimeApp:
         xsb = ttk.Scrollbar(inner, orient="horizontal", command=self.tree.xview)
         self.tree.configure(xscrollcommand=xsb.set)
         xsb.pack(side="bottom", fill="x")
-        self._apply_tree_tags()
 
         self._hover_row = None
         self._hover_bg = []
@@ -967,13 +1221,180 @@ class AnimeApp:
         self.menu.add_command(label="打开 AniList 详情", command=self.open_detail)
         self.menu.add_command(label="在 bgm.tv 搜详情（日文原名）", command=self.open_bgm)
         self.menu.add_separator()
+        self.menu.add_command(label="重新加载封面", command=self.reload_cover)
+        self.menu.add_separator()
         self.menu.add_command(label="复制中文名", command=self.copy_title_zh)
         self.menu.add_command(label="复制日文原名", command=self.copy_title_ja)
         self.menu.add_command(label="复制 AniList 链接", command=self.copy_url)
 
+    # ---------------- 右侧封面面板 ----------------
+
+    def _build_cover_panel(self, parent):
+        """选中某一行时，在表格右侧显示这部番的封面和简介。"""
+        self.cover_panel = ttk.Frame(parent, style="Card.TFrame",
+                                     width=COVER_PANEL_W, padding=(12, 12))
+        # 关掉尺寸传播，否则面板会缩到子控件的自然宽度，图片和信息挤成一条
+        self.cover_panel.pack_propagate(False)
+
+        self.cover_canvas = tk.Canvas(
+            self.cover_panel, width=COVER_W, height=COVER_H,
+            highlightthickness=1, bd=0,
+            bg=self.theme.pal["field"], highlightbackground=self.theme.pal["line"],
+        )
+        self.cover_canvas.pack(pady=(0, 10))
+
+        # 标题用 ttk.Label 而不是画在 canvas 上：中文自动换行交给 wraplength，
+        # 免得自己算像素宽度（中英混排时很容易算错）
+        self.cover_title = ttk.Label(
+            self.cover_panel, text="", style="Card.TLabel",
+            font=(FONT_UI, 11, "bold"), wraplength=COVER_W, justify="left",
+            anchor="w", foreground=self.theme.pal["text"],
+        )
+        self.cover_title.pack(fill="x")
+        self.cover_meta = ttk.Label(
+            self.cover_panel, text="", style="Card.TLabel",
+            font=(FONT_UI, 9), wraplength=COVER_W, justify="left", anchor="w",
+        )
+        self.cover_meta.pack(fill="x", pady=(6, 0))
+
+        if self.cfg.get("show_cover", True):
+            self._cover_placeholder("选中一行看封面")
+
+    def _cover_placeholder(self, text, colour=None):
+        p = self.theme.pal
+        c = self.cover_canvas
+        c.delete("all")
+        c.create_text(COVER_W / 2, COVER_H / 2, text=text, width=COVER_W - 24,
+                      fill=colour or p["text2"], font=(FONT_UI, 9), justify="center")
+
+    def toggle_cover_panel(self):
+        """菜单里开关封面面板，选择记进配置。"""
+        show = bool(self.cover_show_var.get())
+        self.cfg["show_cover"] = show
+        save_config(self.cfg)
+        if show:
+            # before=self.tree：必须有东西排在表格前面，否则它又把宽度吃光
+            self.cover_panel.pack(side="right", fill="y", padx=(1, 0), pady=1,
+                                  before=self.tree)
+            self.on_select()
+        else:
+            self.cover_panel.pack_forget()
+            self.cover_token += 1      # 让在途的封面结果作废
+
+    def _cover_visible(self):
+        """面板是否处于显示状态。
+
+        这里不能用 winfo_ismapped()：它要求祖先窗口已经映射到屏幕，
+        而窗口刚建好、或被其它窗口完全遮挡时它会返回 0，导致封面永远不加载。
+        按「配置 + 控件已建」判断才是可靠的口径。
+        """
+        return (hasattr(self, "cover_canvas")
+                and bool(self.cfg.get("show_cover", True)))
+
+    def _cover_show_current(self, force=False):
+        """把当前选中行的封面显示到面板上（没有就排队去下）。"""
+        if not self._cover_visible():
+            return
+        e = self._selected_entry()
+        if not e:
+            self.cover_img = None
+            self.cover_title.config(text="")
+            self.cover_meta.config(text="")
+            self._cover_placeholder("选中一行看封面")
+            return
+
+        p = self.theme.pal
+        names = [x for x in (e.get("title_zh"), e.get("title")) if x]
+        self.cover_title.config(text=" ／ ".join(names) or "—")
+        bits = []
+        head = " · ".join(x for x in (
+            e.get("format"), e.get("studio"),
+            f"{e['score']} 分" if e.get("score") else "",
+        ) if x)
+        if head:
+            bits.append(head)
+        eps = e.get("total_eps")
+        bits.append(f"共 {eps} 话" if eps else "话数未定")
+        bits.append(f"{e.get('time_local', '')} 本地 / {e.get('time_jst', '')} JST")
+        if e.get("genres"):
+            bits.append("、".join(e["genres"]))
+        if e.get("stream"):
+            bits.append("可看：" + "、".join(s["site"] for s in e["stream"]))
+        self.cover_meta.config(text="\n".join(bits))
+
+        url = (e.get("cover") or "").strip()
+        if not url:
+            self.cover_img = None
+            self._cover_placeholder("这部没有封面图")
+            return
+        if not HAVE_PIL:
+            self.cover_img = None
+            self._cover_placeholder("缺少 Pillow，无法显示 JPEG 封面",
+                                    colour=p["next"])
+            return
+
+        path = _cover_cache_path(url)
+        if not force and os.path.exists(path):
+            try:
+                with open(path, "rb") as f:
+                    png = f.read()
+                img = cover_to_tk(png, (COVER_W, COVER_H))
+                if img is not None:
+                    self._cover_draw(img)
+                    return
+            except OSError:
+                pass
+        self.cover_img = None
+        self._cover_placeholder("正在加载封面…", colour=p["accent"])
+        cover_download_async(url, self)
+
+    def _cover_draw(self, img):
+        """把 Tk 图像居中画到画布上。"""
+        c = self.cover_canvas
+        c.delete("all")
+        c.create_image(COVER_W / 2, COVER_H / 2, image=img, anchor="center")
+        self.cover_img = img      # 必须留引用
+
+    def _on_cover_result(self, payload):
+        """子线程下完封面后的回调（在主线程的 _poll_queue 里执行）。"""
+        token, url, png, err = payload
+        if token != self.cover_token:
+            return                # 选中已经换成别的番了，丢弃
+        if not self._cover_visible():
+            return
+        e = self._selected_entry()
+        if not e or (e.get("cover") or "").strip() != url:
+            return
+        if err is not None or png is None:
+            self.cover_img = None
+            self._cover_placeholder("封面加载失败\n（右键可重试）", colour=self.theme.pal["next"])
+            return
+        img = cover_to_tk(png, (COVER_W, COVER_H))
+        if img is None:
+            self._cover_placeholder("封面解码失败", colour=self.theme.pal["next"])
+            return
+        self._cover_draw(img)
+
+    def reload_cover(self):
+        """右键菜单：强制重新下载当前这行的封面。"""
+        e = self._selected_entry()
+        if not e:
+            return
+        url = (e.get("cover") or "").strip()
+        if not url:
+            return
+        self.cover_token += 1
+        self.cover_img = None
+        self._cover_placeholder("正在重新加载…", colour=self.theme.pal["accent"])
+        cover_download_async(url, self)
+
+    def clear_cover_cache(self):
+        n = cover_clear_cache()
+        self._set_status(f"封面缓存已清空（删除 {n} 个文件）")
+        self.on_select()
+
     def _apply_tree_tags(self):
         """表格的斑马纹 / 悬停 / 今天高亮都跟着主题走。
-
         注意：同一个选项只能由**一个**标签提供，否则 ttk 里谁生效要看标签顺序，
         很难预料。所以行标签里永远只有一个负责背景色的标签（BG_TAGS 之一）。
         """
@@ -1181,6 +1602,7 @@ class AnimeApp:
         if not hasattr(self, "tree"):
             return
         self._restore_hover()          # 表格要重建了，先松开悬停引用
+        prev = self.tree.focus()       # 重建后尽量把选中行恢复回来
         self._heading_texts()
         self.tree.delete(*self.tree.get_children())
         self.nodes.clear()
@@ -1252,6 +1674,12 @@ class AnimeApp:
             f"范围 {self.days_var.get()}"
         )
 
+        # 表格重建会丢掉选中状态，这里恢复并把封面面板同步回去
+        if prev and prev in self.nodes:
+            self.tree.focus(prev)
+            self.tree.selection_set(prev)
+        self._cover_show_current()
+
     def _set_status(self, text):
         self.status.config(text="  " + text)
 
@@ -1262,8 +1690,9 @@ class AnimeApp:
         return self.nodes.get(iid)
 
     def on_select(self, _ev=None):
-        """选中一行时，在状态栏显示中文名 / 日文原名 / 制作公司。"""
+        """选中一行时，状态栏显示详情，右侧面板显示封面。"""
         e = self._selected_entry()
+        self.cover_token += 1          # 上一行的封面若还在路上，作废
         if not e:
             return
         names = [x for x in (e.get("title_zh"), e["title"]) if x]
@@ -1275,6 +1704,7 @@ class AnimeApp:
             f"{' ／ '.join(names)}    {tail}    "
             f"{e['time_local']} 本地 / {e['time_jst']} JST（{e['countdown']}）"
         )
+        self._cover_show_current()
 
     def on_double_click(self, event):
         iid = self.tree.identify_row(event.y) or self.tree.focus()
